@@ -308,45 +308,31 @@ fn try_coerce_types(
 }
 
 fn data_types_match(valid_types: &[DataType], current_types: &[DataType]) -> bool {
+    fn field_matches(valid: &FieldRef, current: &FieldRef) -> bool {
+        valid.is_nullable() == current.is_nullable()
+            && data_type_matches(valid.data_type(), current.data_type())
+    }
+
+    fn data_type_matches(valid: &DataType, current: &DataType) -> bool {
+        match (valid, current) {
+            (valid, current) if valid == current => true,
+            (DataType::List(valid), DataType::List(current))
+            | (DataType::LargeList(valid), DataType::LargeList(current)) => {
+                field_matches(valid, current)
+            }
+            (
+                DataType::FixedSizeList(valid, valid_size),
+                DataType::FixedSizeList(current, current_size),
+            ) => valid_size == current_size && field_matches(valid, current),
+            _ => false,
+        }
+    }
+
     valid_types.len() == current_types.len()
         && valid_types
             .iter()
             .zip(current_types)
-            .all(|(valid_type, current_type)| {
-                data_type_matches_ignoring_list_field_name(valid_type, current_type)
-            })
-}
-
-fn data_type_matches_ignoring_list_field_name(
-    valid_type: &DataType,
-    current_type: &DataType,
-) -> bool {
-    if valid_type == current_type {
-        return true;
-    }
-
-    match (valid_type, current_type) {
-        (DataType::List(valid_field), DataType::List(current_field))
-        | (DataType::LargeList(valid_field), DataType::LargeList(current_field)) => {
-            valid_field.is_nullable() == current_field.is_nullable()
-                && data_type_matches_ignoring_list_field_name(
-                    valid_field.data_type(),
-                    current_field.data_type(),
-                )
-        }
-        (
-            DataType::FixedSizeList(valid_field, valid_size),
-            DataType::FixedSizeList(current_field, current_size),
-        ) => {
-            valid_size == current_size
-                && valid_field.is_nullable() == current_field.is_nullable()
-                && data_type_matches_ignoring_list_field_name(
-                    valid_field.data_type(),
-                    current_field.data_type(),
-                )
-        }
-        _ => false,
-    }
+            .all(|(valid_type, current_type)| data_type_matches(valid_type, current_type))
 }
 
 fn get_valid_types_with_udf<F: UDFCoercionExt>(
@@ -1114,7 +1100,7 @@ mod tests {
         assert!(current_type.equals_datatype(&valid_type));
         assert_ne!(current_type, valid_type);
         assert_eq!(
-            maybe_data_types(&[valid_type.clone()], &[current_type]),
+            maybe_data_types(std::slice::from_ref(&valid_type), &[current_type]),
             Some(vec![valid_type])
         );
     }
@@ -1139,7 +1125,10 @@ mod tests {
         assert!(current_type.equals_datatype(&valid_type));
         assert_ne!(current_type, valid_type);
         assert_eq!(
-            maybe_data_types_without_coercion(&[valid_type.clone()], &[current_type]),
+            maybe_data_types_without_coercion(
+                std::slice::from_ref(&valid_type),
+                &[current_type],
+            ),
             Some(vec![valid_type])
         );
     }
