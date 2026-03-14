@@ -312,7 +312,41 @@ fn data_types_match(valid_types: &[DataType], current_types: &[DataType]) -> boo
         && valid_types
             .iter()
             .zip(current_types)
-            .all(|(valid_type, current_type)| valid_type.equals_datatype(current_type))
+            .all(|(valid_type, current_type)| {
+                data_type_matches_ignoring_list_field_name(valid_type, current_type)
+            })
+}
+
+fn data_type_matches_ignoring_list_field_name(
+    valid_type: &DataType,
+    current_type: &DataType,
+) -> bool {
+    if valid_type == current_type {
+        return true;
+    }
+
+    match (valid_type, current_type) {
+        (DataType::List(valid_field), DataType::List(current_field))
+        | (DataType::LargeList(valid_field), DataType::LargeList(current_field)) => {
+            valid_field.is_nullable() == current_field.is_nullable()
+                && data_type_matches_ignoring_list_field_name(
+                    valid_field.data_type(),
+                    current_field.data_type(),
+                )
+        }
+        (
+            DataType::FixedSizeList(valid_field, valid_size),
+            DataType::FixedSizeList(current_field, current_size),
+        ) => {
+            valid_size == current_size
+                && valid_field.is_nullable() == current_field.is_nullable()
+                && data_type_matches_ignoring_list_field_name(
+                    valid_field.data_type(),
+                    current_field.data_type(),
+                )
+        }
+        _ => false,
+    }
 }
 
 fn get_valid_types_with_udf<F: UDFCoercionExt>(
@@ -765,7 +799,11 @@ fn maybe_data_types(
     for (i, valid_type) in valid_types.iter().enumerate() {
         let current_type = &current_types[i];
 
-        if current_type.equals_datatype(valid_type) {
+        // Keep exact equality here. Some kernels such as `make_array`
+        // require nested field names/order to match exactly at runtime.
+        // Structural-equivalence short-circuiting is handled earlier by
+        // `data_types_match`.
+        if current_type == valid_type {
             new_type.push(current_type.clone())
         } else {
             // attempt to coerce.
@@ -797,7 +835,11 @@ fn maybe_data_types_without_coercion(
     for (i, valid_type) in valid_types.iter().enumerate() {
         let current_type = &current_types[i];
 
-        if current_type.equals_datatype(valid_type) {
+        // Keep exact equality here. Some kernels such as `make_array`
+        // require nested field names/order to match exactly at runtime.
+        // Structural-equivalence short-circuiting is handled earlier by
+        // `data_types_match`.
+        if current_type == valid_type {
             new_type.push(current_type.clone())
         } else if can_cast_types(current_type, valid_type) {
             // validate the valid type is castable from the current type
@@ -1050,6 +1092,96 @@ mod tests {
         for case in cases {
             assert_eq!(maybe_data_types(&case.0, &case.1), case.2)
         }
+    }
+
+    #[test]
+    fn test_maybe_data_types_uses_exact_nested_types() {
+        let struct_fields = vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("prim", DataType::Boolean, true),
+        ];
+        let current_type = DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Struct(struct_fields.clone().into()),
+            true,
+        )));
+        let valid_type = DataType::List(Arc::new(Field::new(
+            "element",
+            DataType::Struct(struct_fields.into()),
+            true,
+        )));
+
+        assert!(current_type.equals_datatype(&valid_type));
+        assert_ne!(current_type, valid_type);
+        assert_eq!(
+            maybe_data_types(&[valid_type.clone()], &[current_type]),
+            Some(vec![valid_type])
+        );
+    }
+
+    #[test]
+    fn test_maybe_data_types_without_coercion_uses_exact_nested_types() {
+        let valid_type = DataType::Struct(
+            vec![
+                Field::new("a", DataType::Int64, true),
+                Field::new("b", DataType::Int64, true),
+            ]
+            .into(),
+        );
+        let current_type = DataType::Struct(
+            vec![
+                Field::new("b", DataType::Int64, true),
+                Field::new("a", DataType::Int64, true),
+            ]
+            .into(),
+        );
+
+        assert!(current_type.equals_datatype(&valid_type));
+        assert_ne!(current_type, valid_type);
+        assert_eq!(
+            maybe_data_types_without_coercion(&[valid_type.clone()], &[current_type]),
+            Some(vec![valid_type])
+        );
+    }
+
+    #[test]
+    fn test_data_types_match_ignores_list_field_name() {
+        let struct_fields = vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("prim", DataType::Boolean, true),
+        ];
+        let current_type = DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Struct(struct_fields.clone().into()),
+            true,
+        )));
+        let valid_type = DataType::List(Arc::new(Field::new(
+            "element",
+            DataType::Struct(struct_fields.into()),
+            true,
+        )));
+
+        assert!(data_types_match(&[valid_type], &[current_type]));
+    }
+
+    #[test]
+    fn test_data_types_match_respects_struct_field_order() {
+        let valid_type = DataType::Struct(
+            vec![
+                Field::new("a", DataType::Int64, true),
+                Field::new("b", DataType::Int64, true),
+            ]
+            .into(),
+        );
+        let current_type = DataType::Struct(
+            vec![
+                Field::new("b", DataType::Int64, true),
+                Field::new("a", DataType::Int64, true),
+            ]
+            .into(),
+        );
+
+        assert!(!data_types_match(&[valid_type], &[current_type]));
     }
 
     #[test]
