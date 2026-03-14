@@ -1771,6 +1771,42 @@ mod test {
     }
 
     #[test]
+    fn scalar_function_preserves_equivalent_nested_types() -> Result<()> {
+        let struct_fields = vec![
+            Field::new("id", Utf8, true),
+            Field::new("prim", DataType::Boolean, true),
+        ];
+        let current_type = DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Struct(struct_fields.clone().into()),
+            true,
+        )));
+        let signature_type = DataType::List(Arc::new(Field::new(
+            "element",
+            DataType::Struct(struct_fields.into()),
+            true,
+        )));
+        let empty = empty_with_type(current_type);
+        let fun = ScalarUDF::new_from_impl(TestScalarUDF {
+            signature: Signature::exact(vec![signature_type], Volatility::Stable),
+        });
+        let scalar_function_expr =
+            Expr::ScalarFunction(ScalarFunction::new_udf(Arc::new(fun), vec![col("a")]));
+        let plan = LogicalPlan::Projection(Projection::try_new(
+            vec![scalar_function_expr],
+            empty,
+        )?);
+
+        assert_analyzed_plan_eq!(
+            plan,
+            @r"
+        Projection: TestScalarUDF(a)
+          EmptyRelation: rows=0
+        "
+        )
+    }
+
+    #[test]
     fn agg_udaf() -> Result<()> {
         let empty = empty();
         let my_avg = create_udaf(

@@ -130,7 +130,7 @@ pub fn fields_with_udf<F: UDFCoercionExt>(
     let valid_types = get_valid_types_with_udf(type_signature, &current_types, func)?;
     if valid_types
         .iter()
-        .any(|data_type| data_type == &current_types)
+        .any(|data_type| data_types_match(data_type, &current_types))
     {
         return Ok(current_fields.to_vec());
     }
@@ -236,7 +236,7 @@ pub fn data_types(
         get_valid_types(function_name.as_ref(), type_signature, current_types)?;
     if valid_types
         .iter()
-        .any(|data_type| data_type == current_types)
+        .any(|data_type| data_types_match(data_type, current_types))
     {
         return Ok(current_types.to_vec());
     }
@@ -305,6 +305,14 @@ fn try_coerce_types(
         "Failed to coerce arguments to satisfy a call to '{function_name}' function: coercion from {} to the signature {type_signature} failed",
         current_types.iter().join(", ")
     )
+}
+
+fn data_types_match(valid_types: &[DataType], current_types: &[DataType]) -> bool {
+    valid_types.len() == current_types.len()
+        && valid_types
+            .iter()
+            .zip(current_types)
+            .all(|(valid_type, current_type)| valid_type.equals_datatype(current_type))
 }
 
 fn get_valid_types_with_udf<F: UDFCoercionExt>(
@@ -757,7 +765,7 @@ fn maybe_data_types(
     for (i, valid_type) in valid_types.iter().enumerate() {
         let current_type = &current_types[i];
 
-        if current_type == valid_type {
+        if current_type.equals_datatype(valid_type) {
             new_type.push(current_type.clone())
         } else {
             // attempt to coerce.
@@ -789,7 +797,7 @@ fn maybe_data_types_without_coercion(
     for (i, valid_type) in valid_types.iter().enumerate() {
         let current_type = &current_types[i];
 
-        if current_type == valid_type {
+        if current_type.equals_datatype(valid_type) {
             new_type.push(current_type.clone())
         } else if can_cast_types(current_type, valid_type) {
             // validate the valid type is castable from the current type
@@ -1218,6 +1226,36 @@ mod tests {
         );
         let coerced_fields =
             fields_with_udf(&current_fields, &MockUdf(signature)).unwrap();
+        assert_eq!(coerced_fields, current_fields);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fields_with_udf_preserves_equivalent_nested_types() -> Result<()> {
+        let struct_fields = vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("prim", DataType::Boolean, true),
+        ];
+        let current_type = DataType::List(Arc::new(Field::new(
+            "item",
+            DataType::Struct(struct_fields.clone().into()),
+            true,
+        )));
+        let signature_type = DataType::List(Arc::new(Field::new(
+            "element",
+            DataType::Struct(struct_fields.into()),
+            true,
+        )));
+
+        assert!(current_type.equals_datatype(&signature_type));
+
+        let current_fields = vec![Arc::new(Field::new("field", current_type, true))];
+        let coerced_fields = fields_with_udf(
+            &current_fields,
+            &MockUdf(Signature::exact(vec![signature_type], Volatility::Stable)),
+        )?;
+
         assert_eq!(coerced_fields, current_fields);
 
         Ok(())
